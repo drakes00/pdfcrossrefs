@@ -5,7 +5,21 @@ import os
 import ast
 import logging as log
 import argparse
+import colorama
 import subprocess
+import collections
+
+
+GUIDED = False
+
+
+def parseInput(res):
+    if res in ("y", "Y"):
+        return True
+    elif res in ("n", "N"):
+        return False
+    else:
+        return res
 
 
 def execw(cmd):
@@ -18,6 +32,25 @@ def execw(cmd):
 
 class PDF(object):
     def __init__(self, pdfdir=None, filename=None):
+        # Guided attributes
+        self.pdfdir = None
+        self.filename = None
+        self.fullpath = None
+        self.name = None
+        self.searchname = None
+        self.author = None
+        self.year = None
+        self.pages = None
+        self.free = None
+        self.norm = None
+        self.stepByStep = None
+        self.scope = None
+        self.targetedIndustry = None
+        self.protocolSpecific = None
+        self.indusAuthors = None
+        self.govAuthors = None
+        self.crossrefs = collections.defaultdict(lambda: None)
+
         if pdfdir is not None and filename is not None:
             self.pdfdir = pdfdir
             self.filename = filename
@@ -26,26 +59,17 @@ class PDF(object):
             tmp = filename.strip(".pdf").split("_")
             self.name = tmp[-1] # TODO Rearange dashes and caps.
             self.author = tmp[0][:-2]
-            self.year = int("20"+tmp[0][-2:]) # TODO 19XX?
+            self.year = "20"+tmp[0][-2:] # TODO 19XX?
 
-            self.pages = int(execw(
+            self.pages = execw(
                 "pdftk \"{}\" dump_data | grep NumberOfPages".format(self.fullpath),
-            )[0].decode("utf-8").strip("\n").split(" ")[1])
-            self.free = "nonfree" not in filename
-
-            # Guided attributes
-            self.norm = None
-            self.stepByStep = None
-            self.scope = None
-            self.targetedIndustry = None
-            self.protocolSpecific = None
-            self.indusAuthors = None
-            self.govAuthors = None
-            self.crossRefs = None
+            )[0].decode("utf-8").strip("\n").split(" ")[1]
 
 
     def toDict(self):
-        return vars(self)
+        varDict = vars(self)
+        varDict.update(dict(varDict["crossrefs"]))
+        return varDict
 
 
     @ classmethod
@@ -58,25 +82,48 @@ class PDF(object):
 
 
     def guided(self):
-        def _parse(res):
-            if res in ("y", "Y"):
-                return True
-            elif res in ("n", "N"):
-                return False
-            else:
-                return res
-
 
         log.info("\t[+] Please input metadata for PDF: {}".format(self.name))
         for attr in vars(self).keys():
             if getattr(self, attr) is None:
-                res =  _parse(input("\t\t- {}: ".format(attr)))
-                setattr(self, attr, res)
+                res =  parseInput(input("\t\t[+] {}: ".format(attr)))
+                if res != "":
+                    setattr(self, attr, res)
             else:
-                print(getattr(self, attr))
+                log.info(colorama.Fore.RED+"\t\t[-] Skipping attribure: {}".format(attr)+colorama.Style.RESET_ALL)
 
 
-def parsePdfs(pdfdir, noMetadata, guided):
+    def updateCrossrefs(self, other):
+        if GUIDED:
+            log.info("\t[+] Searching for crossrefs of \"{}\" in \"{}\".".format(other, self.name))
+            res = input("\t\t[+] Change searched name (leave blank to keep) : ")
+            if res:
+                other = res
+                log.info(colorama.Fore.BLUE+"\t\t[+] Now searching for crossrefs of \"{}\" in \"{}\".".format(other, self.name)+colorama.Style.RESET_ALL)
+        else:
+            log.debug("\t[+] Searching for crossrefs of \"{}\" in \"{}\".".format(other, self.name))
+
+        res,_ = execw("pdfgrep \"{}\" \"{}\"".format(other, self.fullpath))
+        res = res.decode("utf-8")
+        confirm = res != ""
+        if GUIDED:
+            if res:
+                log.info(colorama.Fore.BLUE+"\t\t[+] Occurences found :"+colorama.Style.RESET_ALL)
+                log.info("\n"+res)
+                confirm = bool(parseInput(input("Is it a crossref [y/n] : ")))
+            else:
+                log.info(colorama.Fore.RED+"\t\t[-] No occurences found."+colorama.Style.RESET_ALL)
+
+        if confirm:
+            log.debug(colorama.Fore.BLUE+"\t\t[+] Added crossref of \"{}\" in \"{}\".".format(other, self.name)+colorama.Style.RESET_ALL)
+            self.crossrefs[other] = True
+        else:
+            log.debug(colorama.Fore.RED+"\t\t[+] Added NO crossref of \"{}\" in \"{}\".".format(other, self.name)+colorama.Style.RESET_ALL)
+            self.crossrefs[other] = False
+
+
+def parsePdfs(pdfdir, noMetadata):
+    log.info("[+] Loading PDF info.")
     res = []
 
     if noMetadata:
@@ -101,7 +148,7 @@ def parsePdfs(pdfdir, noMetadata, guided):
             pdf = PDF(pdfdir, filename)
             res += [pdf]
 
-    if guided:
+    if GUIDED:
         log.debug("[+] Entering guided mode.")
         for pdf in res:
             pdf.guided()
@@ -109,7 +156,17 @@ def parsePdfs(pdfdir, noMetadata, guided):
     return res
 
 
+def computeCrossrefs(pdfs):
+    log.info("[+] Computing crossrefs.")
+    for pdf in pdfs:
+        for other in [_ for _ in pdfs if _ != pdf]:
+            pdf.updateCrossrefs(other.searchname)
+
+
 def main():
+    global GUIDED
+
+    colorama.init()
     argParser = argparse.ArgumentParser()
     argParser.add_argument(
         "--verbose", "-v",
@@ -147,7 +204,13 @@ def main():
     else:
         log.basicConfig(format="%(message)s", level=log.INFO)
 
-    pdfs = parsePdfs(args.pdfdir, args.no_metadata, args.guided)
+    if args.guided:
+        GUIDED = True
+
+    pdfs = parsePdfs(args.pdfdir, args.no_metadata)
+    if args.crossrefs:
+        computeCrossrefs(pdfs)
+
     with open(args.pdfdir+"/metadata", "w") as handle:
         handle.write("\n".join([str(pdf.toDict()) for pdf in pdfs])+"\n")
 
